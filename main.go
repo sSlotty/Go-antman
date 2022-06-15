@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/gocarina/gocsv"
 	"github.com/imroc/req/v3"
 	"github.com/schollz/progressbar/v3"
@@ -8,6 +9,7 @@ import (
 	"os"
 	_ "reflect"
 	"runtime"
+	"time"
 )
 
 type Data struct {
@@ -73,9 +75,9 @@ func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 	client := req.C().EnableForceHTTP1()
 	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
 
-	for  {
+	for {
 		select {
-		case job := <- jobs:
+		case job := <-jobs:
 			var resp, err = client.R().
 				SetBasicAuth("elastic", "elastic").
 				SetHeader("Content-Type", "application/json").
@@ -84,13 +86,15 @@ func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 			if err != nil {
 				log.Fatal(err)
 			}
+			
 			results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
+		}
 	}
 }
-
 func main() {
 	runtime.GOMAXPROCS(100)
-	//start := time.Now()
+	start := time.Now()
+	fmt.Println("start : ", start)
 	dataFile, err := os.OpenFile("antman_20220607.csv", os.O_RDWR|os.O_CREATE, os.ModePerm)
 	if err != nil {
 		panic(err)
@@ -113,15 +117,12 @@ func main() {
 		panic(err)
 	}
 
-	client := req.C().EnableForceHTTP1()
-	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
-
 	bar := progressbar.Default(int64(len(_data)))
 
 	jobs := make(chan *Data, len(_data))
 	results := make(chan Result, len(_data))
 
-	for w := 1; w <= 110; w++ {
+	for w := 1; w <= 200; w++ {
 		go crawl(w, jobs, results)
 	}
 
@@ -134,7 +135,7 @@ func main() {
 		var _ = <-results
 		bar.Add(1)
 	}
-	//fmt.Println("Takes all time to process ", time.Since(start))
+	fmt.Println("Takes all time to process ", time.Since(start))
 	close(results)
 
 }
