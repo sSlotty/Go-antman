@@ -73,17 +73,18 @@ func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 	client := req.C().EnableForceHTTP1()
 	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
 
-	for job := range jobs {
-		//fmt.Println("Worker ID : ", wId, ", Job : ", job)
-		var resp, err = client.R().
-			SetBasicAuth("elastic", "elastic").
-			SetHeader("Content-Type", "application/json").
-			SetBody(job).
-			Post("https://localhost:9200/antman_index/_doc")
-		if err != nil {
-			log.Fatal(err)
-		}
-		results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
+	for  {
+		select {
+		case job := <- jobs:
+			var resp, err = client.R().
+				SetBasicAuth("elastic", "elastic").
+				SetHeader("Content-Type", "application/json").
+				SetBody(job).
+				Post("https://localhost:9200/antman_index/_doc")
+			if err != nil {
+				log.Fatal(err)
+			}
+			results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
 	}
 }
 
