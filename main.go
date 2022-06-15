@@ -5,7 +5,6 @@ import (
 	"github.com/gocarina/gocsv"
 	"github.com/imroc/req/v3"
 	"github.com/schollz/progressbar/v3"
-	"log"
 	"os"
 	_ "reflect"
 	"runtime"
@@ -74,20 +73,23 @@ type Result struct {
 func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 	client := req.C().EnableForceHTTP1()
 	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
+	r := client.R().
+		SetBasicAuth("elastic", "elastic").
+		SetHeader("Content-Type", "application/json")
 
 	for {
 		select {
 		case job := <-jobs:
-			var resp, err = client.R().
-				SetBasicAuth("elastic", "elastic").
-				SetHeader("Content-Type", "application/json").
+			var resp, err = r.
 				SetBody(job).
 				Post("https://localhost:9200/antman_index/_doc")
 			if err != nil {
-				log.Fatal(err)
+				// log.Fatal(err) like panic service will stop
 			}
-			
-			results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
+
+			go func() {
+				results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
+			}()
 		}
 	}
 }
@@ -117,25 +119,28 @@ func main() {
 		panic(err)
 	}
 
-	bar := progressbar.Default(int64(len(_data)))
+	size := int64(len(_data))
 
-	jobs := make(chan *Data, len(_data))
-	results := make(chan Result, len(_data))
+	bar := progressbar.Default(size)
+
+	jobs := make(chan *Data, size)
+	results := make(chan Result, size)
 
 	for w := 1; w <= 200; w++ {
 		go crawl(w, jobs, results)
 	}
 
 	for _, data := range _data {
-		jobs <- data
+		go func() {
+			jobs <- data
+		}()
 	}
-	close(jobs)
 
-	for a := 0; a <= len(_data); a++ {
-		var _ = <-results
+	for a := int64(0); a <= size; a++ {
+		<-results
 		bar.Add(1)
 	}
 	fmt.Println("Takes all time to process ", time.Since(start))
 	close(results)
-
+	close(jobs)
 }
