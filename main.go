@@ -4,15 +4,16 @@ import (
 	"fmt"
 	"github.com/gocarina/gocsv"
 	"github.com/imroc/req/v3"
-	"github.com/schollz/progressbar/v3"
+	"log"
 	"os"
 	_ "reflect"
 	"runtime"
-	"time"
+	"sync"
 )
 
 type Data struct {
 	// 1. Create a struct for storing CSV lines and annotate it with csv struct field tags
+	Date                        string  `csv:"date" json:"date"`
 	AdaptorFaultRate            int64   `csv:"adaptor_fault_rate" json:"adaptor_fault_rate"`
 	Circuit                     string  `csv:"circuit" json:"circuit"`
 	Datatotal                   int64   `csv:"datatotal" json:"datatotal"`
@@ -70,7 +71,8 @@ type Result struct {
 	Status int
 }
 
-func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
+func crawl(wId int, jobs <-chan Data, results chan<- Result, wg *sync.WaitGroup) {
+
 	client := req.C().EnableForceHTTP1()
 	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
 	r := client.R().
@@ -78,6 +80,7 @@ func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 		SetHeader("Content-Type", "application/json")
 
 	for {
+
 		select {
 		case job := <-jobs:
 			var resp, err = r.
@@ -86,61 +89,54 @@ func crawl(wId int, jobs <-chan *Data, results chan<- Result) {
 			if err != nil {
 				// log.Fatal(err) like panic service will stop
 			}
-
+			//body := resp.String()
+			fmt.Println("status code : ", resp.StatusCode, "job => "+job.Circuit)
 			go func() {
+				//wg.Wait()
 				results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
+
 			}()
 		}
 	}
+	wg.Done()
 }
+
 func main() {
+
+	var c = make(chan Data)
+	var jobs = make(chan Data)
+	wg := new(sync.WaitGroup)
+
 	runtime.GOMAXPROCS(100)
-	start := time.Now()
-	fmt.Println("start : ", start)
-	dataFile, err := os.OpenFile("antman_20220607.csv", os.O_RDWR|os.O_CREATE, os.ModePerm)
+
+	fileHandle, err := os.OpenFile("june.csv", os.O_RDWR|os.O_CREATE, os.ModePerm)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+	defer fileHandle.Close()
+
+	go func() {
+		err = gocsv.UnmarshalToChan(fileHandle, c)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	results := make(chan Result)
+
+	wg.Add(250)
+	for w := 1; w <= 250; w++ {
+		go crawl(w, jobs, results, wg)
 	}
 
-	defer dataFile.Close()
-	var _data []*Data
-
-	if err := gocsv.UnmarshalFile(dataFile, &_data); err != nil { // Load clients from file
-		panic(err)
+	for i := range c {
+		jobs <- i
 	}
 
-	if _, err := dataFile.Seek(0, 0); err != nil { // Go to the start of the file
-		panic(err)
+	for a := range results {
+		fmt.Println(a)
 	}
+	wg.Wait()
+	//close(results)
 
-	_, err = gocsv.MarshalString(&_data)
-
-	if err != nil {
-		panic(err)
-	}
-
-	size := int64(len(_data))
-
-	bar := progressbar.Default(size)
-
-	jobs := make(chan *Data, size)
-	results := make(chan Result, size)
-
-	for w := 1; w <= 200; w++ {
-		go crawl(w, jobs, results)
-	}
-
-	for _, data := range _data {
-		go func() {
-			jobs <- data
-		}()
-	}
-
-	for a := int64(0); a <= size; a++ {
-		<-results
-		bar.Add(1)
-	}
-	fmt.Println("Takes all time to process ", time.Since(start))
-	close(results)
-	close(jobs)
 }
