@@ -87,17 +87,16 @@ func crawl(wId int, jobs <-chan Data, results chan<- Result, wg *sync.WaitGroup)
 				SetBody(job).
 				Post("https://localhost:9200/antman_index/_doc")
 			if err != nil {
-				// log.Fatal(err) like panic service will stop
+				log.Fatal(err) //like panic service will stop
 			}
 			//body := resp.String()
-			fmt.Println("status code : ", resp.StatusCode, "job => "+job.Circuit)
+			fmt.Println("status code : ", resp.StatusCode, "job => "+job.Circuit, "workerID => ", wId)
 			go func() {
-				//wg.Wait()
 				results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
-
 			}()
 		}
 	}
+
 	wg.Done()
 }
 
@@ -105,6 +104,8 @@ func main() {
 
 	var c = make(chan Data)
 	var jobs = make(chan Data)
+	var results = make(chan Result)
+
 	wg := new(sync.WaitGroup)
 
 	runtime.GOMAXPROCS(100)
@@ -122,10 +123,8 @@ func main() {
 		}
 	}()
 
-	results := make(chan Result)
-
-	wg.Add(250)
-	for w := 1; w <= 250; w++ {
+	for w := 1; w <= 300; w++ {
+		wg.Add(300)
 		go crawl(w, jobs, results, wg)
 	}
 
@@ -133,9 +132,11 @@ func main() {
 		jobs <- i
 	}
 
-	for a := range results {
-		fmt.Println(a)
-	}
+	//for a := 0; a < 22705828; a++ {
+	//	result := <-results
+	//	fmt.Println(result)
+	//	fmt.Println(a)
+	//}
 	wg.Wait()
 	//close(results)
 
