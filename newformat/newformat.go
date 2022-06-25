@@ -4,10 +4,15 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"log"
+
+	// "github.com/imroc/req/v3"
+	"io"
+
 	"github.com/imroc/req/v3"
 	"github.com/schollz/progressbar/v3"
-	"io"
-	"log"
+
+	// "log"
 	"os"
 	"runtime"
 	"strconv"
@@ -99,7 +104,7 @@ func concuRSwWP(f *os.File) {
 	jobsRead := make(chan []string)
 	resRead := make(chan *StructData)
 
-	numwpsSend := 260
+	numwpsSend := 100
 	resultSend := make(chan *Result)
 	var wg sync.WaitGroup
 
@@ -125,9 +130,10 @@ func concuRSwWP(f *os.File) {
 
 		for job := range jobs {
 
+			url := "https://localhost:9200/antman-index-" + job.Date + "/_doc"
 			var resp, err = r.
 				SetBody(job).
-				Post("https://localhost:9200/antman_index_2/_doc")
+				Post(url)
 			if err != nil {
 				log.Fatal(err) //like panic service will stop
 			}
@@ -251,7 +257,7 @@ func parseStruct(data []string) *StructData {
 	toomanydevices_ference_5g, _ := strconv.ParseInt(data[16], 10, 64)
 	Verycloseap, _ := strconv.ParseInt(data[46], 10, 64)
 	return &StructData{
-		Date:                        date.Format("2006-01-02 15:04:05"),
+		Date:                        date.Format("2006-01-02 15:04:05")[0:10],
 		AdaptorFaultRate:            adaptorFaultRate,
 		Circuit:                     data[1],
 		Datatotal:                   datatotal,
