@@ -1,18 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
 	"fmt"
-	"github.com/gocarina/gocsv"
 	"github.com/imroc/req/v3"
+	"github.com/schollz/progressbar/v3"
+	"io"
 	"log"
 	"os"
-	_ "reflect"
 	"runtime"
+	"strconv"
 	"sync"
+	"time"
 )
 
-type Data struct {
-	// 1. Create a struct for storing CSV lines and annotate it with csv struct field tags
+type StructData struct {
 	Date                        string  `csv:"date" json:"date"`
 	AdaptorFaultRate            int64   `csv:"adaptor_fault_rate" json:"adaptor_fault_rate"`
 	Circuit                     string  `csv:"circuit" json:"circuit"`
@@ -67,77 +70,253 @@ type Data struct {
 
 type Result struct {
 	WorkID int
-	jobID  string
 	Status int
-}
-
-func crawl(wId int, jobs <-chan Data, results chan<- Result, wg *sync.WaitGroup) {
-
-	client := req.C().EnableForceHTTP1()
-	client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
-	r := client.R().
-		SetBasicAuth("elastic", "elastic").
-		SetHeader("Content-Type", "application/json")
-
-	for {
-
-		select {
-		case job := <-jobs:
-			var resp, err = r.
-				SetBody(job).
-				Post("https://localhost:9200/antman_index/_doc")
-			if err != nil {
-				log.Fatal(err) //like panic service will stop
-			}
-			//body := resp.String()
-			fmt.Println("status code : ", resp.StatusCode, "job => "+job.Circuit, "workerID => ", wId)
-			go func() {
-				results <- Result{Status: resp.StatusCode, WorkID: wId, jobID: job.Circuit}
-			}()
-		}
-	}
-
-	wg.Done()
 }
 
 func main() {
 
-	var c = make(chan Data)
-	var jobs = make(chan Data)
-	var results = make(chan Result)
+	f1, _ := os.Open("/Users/oat/Desktop/internship/Go-antman/june.csv")
 
-	wg := new(sync.WaitGroup)
+	defer func(f1 *os.File) {
+		err := f1.Close()
+		if err != nil {
 
-	runtime.GOMAXPROCS(100)
+		}
+	}(f1)
 
-	fileHandle, err := os.OpenFile("june.csv", os.O_RDWR|os.O_CREATE, os.ModePerm)
+	ts1 := time.Now()
+
+	fmt.Println("start : ", ts1)
+
+	numLine := getWL("june.csv")
+	concuRSwWP(f1, numLine)
+
+	te1 := time.Since(ts1)
+	fmt.Println("END Concu: ", te1)
+}
+
+//สร้างฟังชั่นที่มีการใช้งานที่ใช้คำสั่งการนับบรรทัดภายในไฟล์ csv ค่าที่รับเข้ามาคือชื่อไฟล์ และค่าที่คืนกลับไปคือจำนวนบรรทัดที่มีอยู่ในไฟล์ที่เป็นตัวเลข
+func getWL(fileName string) int {
+	var line int
+	file, err := os.Open(fileName)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer fileHandle.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+
+		}
+	}(file)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line++
+	}
+	return line
+}
+
+func concuRSwWP(f *os.File, line int) {
+	runtime.GOMAXPROCS(100)
+	fcsv := csv.NewReader(f)
+	//rsRead := make([]*StructData, 0)
+	numwpsRead := 1000
+	jobsRead := make(chan []string)
+	resRead := make(chan *StructData)
+
+	numwpsSend := 200
+	resultSend := make(chan *Result)
+	rsSend := make([]*Result, 0)
+	var wg sync.WaitGroup
+
+	workerRead := func(jobs <-chan []string, results chan<- *StructData) {
+		for {
+			select {
+			case job, ok := <-jobs:
+				if !ok {
+					return
+				}
+				results <- parseStruct(job)
+			}
+		}
+	}
+
+	wokrkerSend := func(wId int, jobs <-chan *StructData, results chan<- *Result) {
+
+		client := req.C().EnableForceHTTP1()
+		client.SetRootCertsFromFile("/Users/oat/Desktop/internship/ca.crt", "/Users/oat/Desktop/internship/es01.crt")
+		r := client.R().
+			SetBasicAuth("elastic", "elastic").
+			SetHeader("Content-Type", "application/json")
+
+		for job := range jobs {
+			url := "https://localhost:9200/antman-index-" + job.Date + "/_doc"
+			var resp, err = r.
+				SetBody(job).
+				Post(url)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if resp.IsSuccess() {
+				results <- &Result{Status: resp.StatusCode, WorkID: wId}
+			}
+		}
+
+	}
+
+	// init workers read
+	for w := 0; w < numwpsRead; w++ {
+		wg.Add(numwpsRead)
+		go func() {
+			defer wg.Done()
+			workerRead(jobsRead, resRead)
+		}()
+	}
+
+	//init worker send
+	for x := 0; x < numwpsSend; x++ {
+
+		wg.Add(numwpsSend)
+		go wokrkerSend(x, resRead, resultSend)
+
+	}
 
 	go func() {
-		err = gocsv.UnmarshalToChan(fileHandle, c)
-		if err != nil {
-			log.Fatal(err)
+		for {
+			rStr, err := fcsv.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Println("ERROR: ", err.Error())
+				break
+			}
+
+			jobsRead <- rStr
 		}
 	}()
 
-	for w := 1; w <= 300; w++ {
-		wg.Add(300)
-		go crawl(w, jobs, results, wg)
+	go func() {
+		wg.Wait()
+		close(resRead)  // when you close(res) it breaks the below loop.
+		close(jobsRead) // close jobs to signal workers that no more job are incoming.
+
+	}()
+
+	bar := progressbar.Default(int64(line))
+	for r := range resultSend {
+		rsSend = append(rsSend, r)
+		err := bar.Add(1)
+		if err != nil {
+			return
+		}
+
+		if bar.IsFinished() {
+			fmt.Println("Finish send data => ", len(rsSend))
+			break
+		}
 	}
 
-	for i := range c {
-		jobs <- i
+}
+
+func parseStruct(data []string) *StructData {
+
+	date, _ := time.Parse("20060102", data[0])
+	adaptorFaultRate, _ := strconv.ParseInt(data[45], 10, 64)
+	datatotal, _ := strconv.ParseInt(data[6], 10, 64)
+	disconnect, _ := strconv.ParseInt(data[18], 10, 64)
+	fiberflapping, _ := strconv.ParseInt(data[48], 10, 64)
+	fttxpacketdrop, _ := strconv.ParseInt(data[21], 10, 64)
+	highcpu, _ := strconv.ParseInt(data[13], 10, 64)
+	highmem, _ := strconv.ParseInt(data[12], 10, 64)
+	hightemp, _ := strconv.ParseInt(data[11], 10, 64)
+	info_Averagecpu, _ := strconv.ParseFloat(data[32], 64)
+	info_Average_device_count_2_gq1, _ := strconv.ParseInt(data[34], 10, 64)
+	info_Average_device_count_2_gq2, _ := strconv.ParseInt(data[36], 10, 64)
+	info_Average_device_count_2_gq3, _ := strconv.ParseInt(data[38], 10, 64)
+	info_Average_device_count_2_gq4, _ := strconv.ParseInt(data[40], 10, 64)
+	info_Average_device_count_5_gq1, _ := strconv.ParseInt(data[35], 10, 64)
+	info_Average_device_count_5_gq2, _ := strconv.ParseInt(data[37], 10, 64)
+	info_Average_device_count_5_gq3, _ := strconv.ParseInt(data[39], 10, 64)
+	info_Average_device_count_5_gq4, _ := strconv.ParseInt(data[41], 10, 64)
+	info_Average_device_reconnect, _ := strconv.ParseFloat(data[33], 64)
+	info_Average_fttxpower, _ := strconv.ParseFloat(data[44], 64)
+	info_Average_mem, _ := strconv.ParseFloat(data[31], 64)
+	info_Average_rssi_2g, _ := strconv.ParseFloat(data[24], 64)
+	info_Average_rssi_5g, _ := strconv.ParseInt(data[26], 10, 64)
+	info_Average_snr_2g, _ := strconv.ParseFloat(data[25], 64)
+	info_Average_snr_5g, _ := strconv.ParseInt(data[27], 10, 64)
+	info_Average_temp, _ := strconv.ParseFloat(data[30], 64)
+	info_Average_TxrxRate_2g, _ := strconv.ParseInt(data[28], 10, 64)
+	info_Average_TxrxRate_5g, _ := strconv.ParseInt(data[29], 10, 64)
+	info_Bandsteering, _ := strconv.ParseInt(data[23], 10, 64)
+	info_max_fttxpower, _ := strconv.ParseInt(data[43], 10, 64)
+	info_min_fttxpower, _ := strconv.ParseFloat(data[42], 64)
+	internet_disconnect, _ := strconv.ParseInt(data[19], 10, 64)
+	lanerror, _ := strconv.ParseInt(data[20], 10, 64)
+	low_fttxpower, _ := strconv.ParseInt(data[8], 10, 64)
+	low_land_speed, _ := strconv.ParseInt(data[10], 10, 64)
+	low_wifi_txrx, _ := strconv.ParseInt(data[9], 10, 64)
+	multiplenetwork, _ := strconv.ParseInt(data[47], 10, 64)
+	no5ghz, _ := strconv.ParseInt(data[14], 10, 64)
+	painscore, _ := strconv.ParseInt(data[5], 10, 64)
+	powerloss, _ := strconv.ParseInt(data[49], 10, 64)
+	reboot, _ := strconv.ParseInt(data[17], 10, 64)
+	T3Wifi5gIssue, _ := strconv.ParseInt(data[22], 10, 64)
+	toomanydevices, _ := strconv.ParseInt(data[7], 10, 64)
+	toomanydevices_ference_2g, _ := strconv.ParseInt(data[15], 10, 64)
+	toomanydevices_ference_5g, _ := strconv.ParseInt(data[16], 10, 64)
+	Verycloseap, _ := strconv.ParseInt(data[46], 10, 64)
+	return &StructData{
+		Date:                        date.Format("2006-01-02 15:04:05")[0:10],
+		AdaptorFaultRate:            adaptorFaultRate,
+		Circuit:                     data[1],
+		Datatotal:                   datatotal,
+		Disconnect:                  disconnect,
+		Fiberflapping:               fiberflapping,
+		Fttxpacketdrop:              fttxpacketdrop,
+		Highcpu:                     highcpu,
+		Highmem:                     highmem,
+		Hightemp:                    hightemp,
+		InfoAverageCPU:              info_Averagecpu,
+		InfoAverageDevicesCount2gQ1: info_Average_device_count_2_gq1,
+		InfoAverageDevicesCount2gQ2: info_Average_device_count_2_gq2,
+		InfoAverageDevicesCount2gQ3: info_Average_device_count_2_gq3,
+		InfoAverageDevicesCount2gQ4: info_Average_device_count_2_gq4,
+		InfoAverageDevicesCount5gQ1: info_Average_device_count_5_gq1,
+		InfoAverageDevicesCount5gQ2: info_Average_device_count_5_gq2,
+		InfoAverageDevicesCount5gQ3: info_Average_device_count_5_gq3,
+		InfoAverageDevicesCount5gQ4: info_Average_device_count_5_gq4,
+		InfoAverageDevicesReconnect: info_Average_device_reconnect,
+		InfoAverageFttxpower:        info_Average_fttxpower,
+		InfoAverageMem:              info_Average_mem,
+		InfoAverageRssi2g:           info_Average_rssi_2g,
+		InfoAverageRssi5g:           info_Average_rssi_5g,
+		InfoAverageSnr2g:            info_Average_snr_2g,
+		InfoAverageSnr5g:            info_Average_snr_5g,
+		InfoAverageTemp:             info_Average_temp,
+		InfoAverageTxrxRate2g:       info_Average_TxrxRate_2g,
+		InfoAverageTxrxRate5g:       info_Average_TxrxRate_5g,
+		InfoBandsteering:            info_Bandsteering,
+		InfoMaxFttxpower:            info_max_fttxpower,
+		InfoMinFttxpower:            info_min_fttxpower,
+		Internetdisconnect:          internet_disconnect,
+		Lanerror:                    lanerror,
+		Lowfttxpower:                low_fttxpower,
+		Lowlanspeed:                 low_land_speed,
+		Lowwifitxrx:                 low_wifi_txrx,
+		Model:                       data[3],
+		Multiplenetwork:             multiplenetwork,
+		No5ghz:                      no5ghz,
+		Painscore:                   painscore,
+		Powerloss:                   powerloss,
+		Reboot:                      reboot,
+		Serial:                      data[2],
+		T3Wifi5gIssue:               T3Wifi5gIssue,
+		Toomanydevices:              toomanydevices,
+		Toomanyinterference2g:       toomanydevices_ference_2g,
+		Toomanyinterference5g:       toomanydevices_ference_5g,
+		Version:                     data[4],
+		Verycloseap:                 Verycloseap,
 	}
-
-	//for a := 0; a < 22705828; a++ {
-	//	result := <-results
-	//	fmt.Println(result)
-	//	fmt.Println(a)
-	//}
-	wg.Wait()
-	//close(results)
-
 }
